@@ -13,6 +13,7 @@
 #include <xcb/composite.h>
 #include <xcb/render.h>
 #include <xcb/xfixes.h>
+#include <xcb/xcbext.h>
 #include "util/signal.h"
 #include "xwayland/xwm.h"
 
@@ -24,6 +25,10 @@ static int32_t scale(struct wlr_xwm *xwm, int32_t val) {
 static int32_t unscale(struct wlr_xwm *xwm, int32_t val) {
 	return (val + xwm->xwayland->scale/2) / xwm->xwayland->scale;
 }
+
+static xcb_extension_t xwayland_ext_id = {
+	.name = "XWAYLAND",
+};
 
 const char *atom_map[ATOM_LAST] = {
 	[WL_SURFACE_ID] = "WL_SURFACE_ID",
@@ -87,6 +92,9 @@ const char *atom_map[ATOM_LAST] = {
 	[DND_ACTION_ASK] = "XdndActionAsk",
 	[DND_ACTION_PRIVATE] = "XdndActionPrivate",
 	[NET_CLIENT_LIST] = "_NET_CLIENT_LIST",
+	[XSETTINGS_SETTINGS] = "_XSETTINGS_SETTINGS",
+	[XSETTINGS_S0] = "_XSETTINGS_S0",
+	[MANAGER] = "MANAGER",
 };
 
 static const struct wlr_surface_role xwayland_surface_role;
@@ -1517,6 +1525,7 @@ void xwm_destroy(struct wlr_xwm *xwm) {
 static void xwm_get_resources(struct wlr_xwm *xwm) {
 	xcb_prefetch_extension_data(xwm->xcb_conn, &xcb_xfixes_id);
 	xcb_prefetch_extension_data(xwm->xcb_conn, &xcb_composite_id);
+	xcb_prefetch_extension_data(xwm->xcb_conn, &xwayland_ext_id); // TODO what if extension is not present??
 
 	size_t i;
 	xcb_intern_atom_cookie_t cookies[ATOM_LAST];
@@ -1547,6 +1556,8 @@ static void xwm_get_resources(struct wlr_xwm *xwm) {
 	if (!xwm->xfixes || !xwm->xfixes->present) {
 		wlr_log(WLR_DEBUG, "xfixes not available");
 	}
+
+	xwm->xwayland_ext = xcb_get_extension_data(xwm->xcb_conn, &xwayland_ext_id);
 
 	xcb_xfixes_query_version_cookie_t xfixes_cookie;
 	xcb_xfixes_query_version_reply_t *xfixes_reply;
@@ -1611,6 +1622,75 @@ static void xwm_create_wm_window(struct wlr_xwm *xwm) {
 		xwm->window,
 		xwm->atoms[NET_WM_CM_S0],
 		XCB_CURRENT_TIME);
+}
+
+static void xwm_xsettings_set(struct wlr_xwm *xwm) {
+	uint8_t data[] = {
+		XCB_IMAGE_ORDER_LSB_FIRST,
+		0, 0, 0,
+		xwm->xsettings_serial, 0, 0, 0, // serial
+		1, 0, 0, 0, // setting count
+
+		0, // type: XSettingsTypeInteger
+		0, // unused
+		23, 0, // name len
+		71, 100, 107, 47, 87, 105, 110, 100, 111, 119, 83, 99, 97, 108, 105, 110, 103, 70, 97, 99, 116, 111, 114, // name
+		0, // name padding (round up to multiple of 4)
+		xwm->xsettings_serial, 0, 0, 0, // serial
+		xwm->xwayland->scale, 0, 0, 0, // value
+	};
+
+	xcb_change_property(xwm->xcb_conn,
+		XCB_PROP_MODE_REPLACE,
+		xwm->xsettings_window,
+		xwm->atoms[XSETTINGS_SETTINGS],
+		xwm->atoms[XSETTINGS_SETTINGS],
+		8,
+		sizeof(data),
+		data
+	);
+
+	wlr_log(WLR_ERROR, "xwm_xsettings_set window %x scale %d serial %d", xwm->window, xwm->xwayland->scale, xwm->xsettings_serial);
+}
+
+static void xwm_xsettings_init(struct wlr_xwm *xwm) {
+	wlr_log(WLR_ERROR, "xwm_xsettings_init");
+
+	xwm->xsettings_serial = 1;
+	xwm->xsettings_window = xcb_generate_id(xwm->xcb_conn);
+
+	xcb_create_window(xwm->xcb_conn,
+		XCB_COPY_FROM_PARENT,
+		xwm->xsettings_window,
+		xwm->screen->root,
+		0, 0,
+		10, 10,
+		0,
+		XCB_WINDOW_CLASS_INPUT_OUTPUT,
+		xwm->screen->root_visual,
+		0, NULL);
+
+	xwm_xsettings_set(xwm);
+	xcb_set_selection_owner(xwm->xcb_conn, xwm->xsettings_window, xwm->atoms[XSETTINGS_S0], XCB_CURRENT_TIME);
+
+	xcb_client_message_event_t event = {
+		.response_type = XCB_CLIENT_MESSAGE,
+		.format = 32,
+		.sequence = 0,
+		.window = xwm->screen->root,
+		.type = xwm->atoms[MANAGER],
+		.data = {
+			.data32 = {
+				0, //timestamp
+				xwm->atoms[XSETTINGS_S0],
+				xwm->xsettings_window,
+				0,
+			}
+		},
+	};
+
+	xcb_send_event(xwm->xcb_conn, false, xwm->screen->root, XCB_EVENT_MASK_STRUCTURE_NOTIFY, (char*)&event);
+	xcb_flush(xwm->xcb_conn);
 }
 
 // TODO use me to support 32 bit color somehow
@@ -1725,6 +1805,7 @@ struct wlr_xwm *xwm_create(struct wlr_xwayland *wlr_xwayland) {
 	wl_list_init(&xwm->surfaces);
 	wl_list_init(&xwm->unpaired_surfaces);
 	xwm->ping_timeout = 10000;
+	xwm->xsettings_serial = 1;
 
 	xwm->xcb_conn = xcb_connect_to_fd(wlr_xwayland->wm_fd[0], NULL);
 
@@ -1809,6 +1890,8 @@ struct wlr_xwm *xwm_create(struct wlr_xwayland *wlr_xwayland) {
 
 	xwm_create_wm_window(xwm);
 
+	xwm_xsettings_init(xwm);
+
 	xcb_flush(xwm->xcb_conn);
 
 	return xwm;
@@ -1877,4 +1960,43 @@ bool wlr_xwayland_or_surface_wants_focus(
 	}
 
 	return ret;
+}
+
+
+typedef struct {
+	uint8_t      major_opcode;
+	uint8_t      minor_opcode;
+	uint16_t     length;
+	uint16_t     screen;
+	uint16_t     scale;
+} xwayland_ext_set_scale_request_t;
+
+void xwm_scale_changed(struct wlr_xwm *xwm) {
+	xwm->xsettings_serial++;
+	xwm_xsettings_set(xwm);
+
+	xcb_protocol_request_t req = {
+		.count = 1,
+		.ext = &xwayland_ext_id,
+		.opcode = 1,
+		.isvoid = false,
+	};
+
+	xwayland_ext_set_scale_request_t xcb_out = {
+		.screen = 0,
+		.scale = xwm->xwayland->scale,
+	};
+
+	struct iovec xcb_parts[3];
+	xcb_parts[2].iov_base = (char *) &xcb_out;
+	xcb_parts[2].iov_len = sizeof(xcb_out);
+	xcb_send_request(xwm->xcb_conn, 0, xcb_parts+2, &req);
+
+	// Reconfigure all surfaces with the new scale.
+	struct wlr_xwayland_surface *surface;
+	wl_list_for_each(surface, &xwm->surfaces, link) {
+		wlr_xwayland_surface_configure(surface, surface->x, surface->y, surface->width, surface->height);
+	}
+
+	xcb_flush(xwm->xcb_conn);
 }
