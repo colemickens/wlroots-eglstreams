@@ -1,0 +1,15 @@
+name: "rebase-wlroots-eglstreams"
+on:
+  push:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - name: mirror
+      run: ./.github/workflows/sync.sh
