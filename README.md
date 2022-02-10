@@ -1,4 +1,7 @@
-# wlroots-eglstreams - NVidia EGLStreams support for popular wayland compositor library!
+# ARCHIVED
+## My NVidia GPU has burned out recently, so I'm unable to make any further testing and support of this fork, unfortunately. Please fork it if you wish to continue development.
+
+## wlroots-eglstreams - NVidia EGLStreams support for popular wayland compositor library!
 
 Supported:
 ```
